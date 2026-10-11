@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import asyncio
 import logging
@@ -11,19 +12,85 @@ from helper.utils import progress_for_pyrogram
 logger = logging.getLogger("WzgramBot")
 process_semaphore = asyncio.Semaphore(2)
 
-@Client.on_message(filters.document | filters.video | filters.audio & filters.private)
-async def auto_rename_files(client: Client, message: Message):
+@Client.on_message(filters.command("autorename") & filters.private)
+async def set_autorename_format(client: Client, message: Message):
     user_id = message.from_user.id
     await db.add_user(user_id)
+    
+    format_text = message.text.split(" ", 1)
+    if len(format_text) < 2:
+        settings = await db.get_user_settings(user_id)
+        current_format = settings.get("autorename_format", "Devilman Crybaby - [S{season}-E{episode}] [{quality}] [{audio}] @Anime_Kyoto")
+        await message.reply_text(
+            "» ꜱᴇᴛᴜᴘ ᴀᴜᴛᴏ ʀᴇɴᴀᴍᴇ ꜰᴏʀᴍᴀᴛ\n\n"
+            "ᴠᴀʀɪᴀʙʟᴇꜱ :\n"
+            "➲ `{season}` - ᴛᴏ ʀᴇᴘʟᴀᴄᴇ ꜱᴇᴀꜱᴏɴ\n"
+            "➲ `{episode}` - ᴛᴏ ʀᴇᴘʟᴀᴄᴇ ᴇᴘɪꜱᴏᴅᴇ ɴᴜᴍʙᴇʀ\n"
+            "➲ `{quality}` - ᴛᴏ ʀᴇᴘʟᴀᴄᴇ ǫᴜᴀʟɪᴛʏ\n"
+            "➲ `{audio}` - ᴛᴏ ʀᴇᴘʟᴀᴄᴇ ᴀᴜᴅɪᴏ/ʟᴀɴɢᴜᴀɢᴇ\n\n"
+            "‣ ꜰᴏʀ ᴇx:- `/autorename Devilman Crybaby - [S{season}-E{episode}] [{quality}] [{audio}] @Anime_Kyoto`\n\n"
+            f"current format: `{current_format}`"
+        )
+        return
+        
+    new_format = format_text[1]
+    await db.update_user_settings(user_id, "autorename_format", new_format)
+    await message.reply_text(f"✅ **Auto-Rename format successfully saved!**\n\n`{new_format}`")
+
+def extract_file_metadata(filename):
+    # Extract Season (e.g., S1, Season 1)
+    season_match = re.search(r"(?i)(?:s|season)\s*(\d+)", filename)
+    season = season_match.group(1).zfill(2) if season_match else "01"
+    
+    # Extract Episode (e.g., Ep03, E03, Episode 3)
+    ep_match = re.search(r"(?i)(?:ep?|episode)\s*(\d+)", filename)
+    if not ep_match:
+        # Fallback to general number patterns if 'ep' isn't explicitly written
+        num_match = re.search(r"[\s._-]+(\d{1,3})[\s._-]", filename)
+        episode = num_match.group(1).zfill(2) if num_match else "01"
+    else:
+        episode = ep_match.group(1).zfill(2)
+        
+    # Extract Quality
+    quality_match = re.search(r"(?i)(480p|720p|1080p|2160p|4K)", filename)
+    quality = quality_match.group(1) if quality_match else "720p"
+    
+    # Extract Audio
+    audio_match = re.search(r"(?i)(Dual Audio|Multi Audio|Hindi|English|Japanese|Tamil|Telugu)", filename)
+    audio = audio_match.group(1) if audio_match else "Sub"
+    
+    return season, episode, quality, audio
+
+@Client.on_message(filters.document | filters.video | filters.audio & filters.private)
+async def auto_rename_workflow(client: Client, message: Message):
+    user_id = message.from_user.id
+    await db.add_user(user_id)
+    
+    settings = await db.get_user_settings(user_id)
+    template = settings.get("autorename_format", "Devilman Crybaby - [S{season}-E{episode}] [{quality}] [{audio}] @Anime_Kyoto")
     
     media = message.document or message.video or message.audio
     if not media:
         return
         
-    original_name = getattr(media, "file_name", "Downloaded_File")
-    logger.info(f"Incoming media from user {user_id}. Filename: '{original_name}'")
+    original_name = getattr(media, "file_name", "Video_File.mkv")
+    logger.info(f"Auto-rename triggered for user {user_id} with file: '{original_name}'")
     
-    msg = await message.reply_text("🔄 Wzgram processing file download & rename workflow...")
+    # Extract metadata using regex parser
+    season, episode, quality, audio = extract_file_metadata(original_name)
+    
+    # Replace format variables safely
+    custom_name = template
+    custom_name = custom_name.replace("{season}", season)
+    custom_name = custom_name.replace("{episode}", episode)
+    custom_name = custom_name.replace("{quality}", quality)
+    custom_name = custom_name.replace("{audio}", audio)
+    
+    _, file_ext = os.path.splitext(original_name)
+    if not custom_name.endswith(file_ext):
+        custom_name += file_ext
+        
+    msg = await message.reply_text(f"🔄 Auto-renaming to:\n`{custom_name}`")
     
     async with process_semaphore:
         download_path = None
@@ -38,45 +105,33 @@ async def auto_rename_files(client: Client, message: Message):
             )
             
             if not download_path or not os.path.exists(download_path):
-                logger.error(f"Failed to download file for user {user_id}")
                 await msg.edit("❌ Failed to download file.")
                 return
 
-            logger.info(f"Successfully downloaded to {download_path}")
-            dir_name, file_ext = os.path.splitext(download_path)
-            custom_name = f"[Wzgram] {original_name}"
-            output_path = os.path.join("downloads", f"Renamed_{int(time.time())}{file_ext}")
-            
+            output_path = os.path.join("downloads", f"{int(time.time())}_{custom_name}")
             os.rename(download_path, output_path)
-            logger.info(f"RENAMED file: '{original_name}' -> '{output_path}'")
 
             up_start = time.time()
             await msg.edit("📤 Wzgram uploading renamed file...")
             await client.send_document(
                 chat_id=message.chat.id,
                 document=output_path,
-                caption=f"**File:** `{original_name}`\n⚡ Powered by **Wzgram**",
+                caption=f"**{custom_name}**\n⚡ Powered by **Wzgram**",
                 progress=progress_for_pyrogram,
                 progress_args=("🚀 Wzgram Uploading...", msg, up_start)
             )
-            logger.info(f"Successfully uploaded renamed file to chat {message.chat.id}")
             await msg.delete()
 
         except FloodWait as e:
-            logger.warning(f"Telegram FloodWait encountered: sleeping for {e.value}s")
             await asyncio.sleep(e.value)
             await message.reply_text(f"⚠️ Rate limited. Resumed after {e.value}s.")
         except Exception as e:
-            logger.error(f"Error processing file for user {user_id}: {e}")
+            logger.error(f"Error in auto-rename for user {user_id}: {e}")
             await msg.edit(f"⚠️ Error occurred: `{str(e)}`")
         finally:
             if download_path and os.path.exists(download_path):
-                try: 
-                    os.remove(download_path)
-                    logger.info(f"Cleaned up temp download: {download_path}")
+                try: os.remove(download_path)
                 except: pass
             if output_path and os.path.exists(output_path):
-                try: 
-                    os.remove(output_path)
-                    logger.info(f"Cleaned up temp output: {output_path}")
+                try: os.remove(output_path)
                 except: pass
