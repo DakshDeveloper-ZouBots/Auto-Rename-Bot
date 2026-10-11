@@ -45,7 +45,6 @@ def extract_file_metadata(filename):
     # Extract Episode (e.g., Ep03, E03, Episode 3)
     ep_match = re.search(r"(?i)(?:ep?|episode)\s*(\d+)", filename)
     if not ep_match:
-        # Fallback to general number patterns if 'ep' isn't explicitly written
         num_match = re.search(r"[\s._-]+(\d{1,3})[\s._-]", filename)
         episode = num_match.group(1).zfill(2) if num_match else "01"
     else:
@@ -97,19 +96,27 @@ async def auto_rename_workflow(client: Client, message: Message):
         output_path = None
         try:
             start_time = time.time()
+            
+            # FIX: Do not pass directory string to file_name. Let Pyrogram download to default path first, or use a valid file path.
             download_path = await client.download_media(
                 message,
-                file_name="downloads/",
                 progress=progress_for_pyrogram,
                 progress_args=("📥 Wzgram Downloading...", msg, start_time)
             )
             
-            if not download_path or not os.path.exists(download_path):
-                await msg.edit("❌ Failed to download file.")
+            if not download_path or not os.path.exists(download_path) or os.path.getsize(download_path) == 0:
+                await msg.edit("❌ Failed to download file or file size is 0 bytes.")
                 return
 
+            logger.info(f"Successfully downloaded to {download_path} (Size: {os.path.getsize(download_path)} bytes)")
+            
+            # Create output path in downloads directory
+            os.makedirs("downloads", exist_ok=True)
             output_path = os.path.join("downloads", f"{int(time.time())}_{custom_name}")
-            os.rename(download_path, output_path)
+            
+            # Move/Rename downloaded file to output path
+            os.replace(download_path, output_path)
+            logger.info(f"RENAMED file: '{original_name}' -> '{output_path}'")
 
             up_start = time.time()
             await msg.edit("📤 Wzgram uploading renamed file...")
